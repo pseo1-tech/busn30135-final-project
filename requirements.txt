@@ -1,0 +1,15 @@
+langgraph
+langchain-core
+langchain-google-genai
+langchain-openai
+rich
+massive
+beautifulsoup4
+nest_asyncio
+transformers
+torch
+pandas
+pyarrow
+yfinance
+lxml
+numpy
