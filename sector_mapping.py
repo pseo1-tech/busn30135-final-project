@@ -5,8 +5,13 @@ Maps individual stock tickers (e.g. AAPL) to GICS sectors (e.g. Information Tech
 and then to sector ETFs (e.g. XLK).
 """
 
+import logging
 import os
 import pandas as pd
+
+# Suppress noisy HTTP warnings from yfinance/urllib3 (e.g. 404s for unknown tickers)
+logging.getLogger("urllib3").setLevel(logging.CRITICAL)
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 # GICS sector name -> sector ETF ticker
 SECTOR_TO_ETF = {
@@ -151,15 +156,28 @@ def aggregate_sector_signals(scores_df: pd.DataFrame) -> pd.DataFrame:
             return group[col].mean()
         return (group[col] * weights).sum() / weights.sum()
 
+    has_finbert = "avg_finbert_sentiment" in scores_df.columns
+
     rows = []
     for (date, etf), group in scores_df.groupby(["date", "sector_etf"]):
-        rows.append({
+        row = {
             "date": date,
             "sector_etf": etf,
             "avg_sentiment": round(weighted_avg(group, "avg_sentiment"), 4),
             "avg_direction": round(weighted_avg(group, "avg_direction"), 2),
             "num_articles": int(group["num_articles"].sum()),
             "num_tickers": len(group),
-        })
+        }
+        if has_finbert:
+            valid = group["avg_finbert_sentiment"].notna()
+            if valid.any():
+                g = group[valid]
+                w = g["num_articles"]
+                row["avg_finbert_sentiment"] = round(
+                    (g["avg_finbert_sentiment"] * w).sum() / w.sum(), 4
+                )
+            else:
+                row["avg_finbert_sentiment"] = None
+        rows.append(row)
 
     return pd.DataFrame(rows).sort_values(["date", "sector_etf"]).reset_index(drop=True)

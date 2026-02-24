@@ -424,6 +424,7 @@ BODY (truncated):
                     sentiment_score=max(-1.0, min(1.0, float(data.get("sentiment_score", 0)))),
                     price_direction_score=max(1, min(10, int(data.get("price_direction_score", 5)))),
                     reasoning=data.get("reasoning", ""),
+                    finbert_sentiment=article.finbert_sentiment,
                 )
             else:
                 # Fallback: use FinBERT score directly
@@ -434,6 +435,7 @@ BODY (truncated):
                     sentiment_score=article.finbert_sentiment or 0.0,
                     price_direction_score=5,
                     reasoning="LLM did not return a score for this article; using FinBERT fallback.",
+                    finbert_sentiment=article.finbert_sentiment,
                 )
             scores_out.append(score)
 
@@ -448,6 +450,7 @@ BODY (truncated):
                 sentiment_score=article.finbert_sentiment or 0.0,
                 price_direction_score=5,
                 reasoning=f"Batch parse error: {e}. Using FinBERT fallback.",
+                finbert_sentiment=article.finbert_sentiment,
             ))
 
     if logs_dir:
@@ -483,12 +486,15 @@ def aggregator_node(state: SentimentState):
     for ticker, scores in sorted(ticker_map.items()):
         avg_sent = sum(s.sentiment_score for s in scores) / len(scores)
         avg_dir = sum(s.price_direction_score for s in scores) / len(scores)
+        finbert_scores = [s.finbert_sentiment for s in scores if s.finbert_sentiment is not None]
+        avg_finbert = round(sum(finbert_scores) / len(finbert_scores), 3) if finbert_scores else None
 
         aggregates.append(TickerAggregate(
             ticker=ticker,
             num_articles=len(scores),
             avg_sentiment=round(avg_sent, 3),
             avg_price_direction=round(avg_dir, 1),
+            avg_finbert_sentiment=avg_finbert,
             article_scores=scores,
         ))
 

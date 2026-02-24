@@ -27,6 +27,7 @@ class ArticleScore(BaseModel):
     sentiment_score: float = Field(..., ge=-1.0, le=1.0, description="Sentiment from -1.0 (very negative) to +1.0 (very positive)")
     price_direction_score: int = Field(..., ge=1, le=10, description="Price direction from 1 (strong sell) to 10 (strong buy)")
     reasoning: str = ""
+    finbert_sentiment: Optional[float] = Field(None, description="Raw FinBERT sentiment score (-1 to +1)")
 
 
 class TickerAggregate(BaseModel):
@@ -35,6 +36,7 @@ class TickerAggregate(BaseModel):
     num_articles: int
     avg_sentiment: float
     avg_price_direction: float
+    avg_finbert_sentiment: Optional[float] = Field(None, description="Average raw FinBERT sentiment across articles")
     article_scores: List[ArticleScore] = Field(default_factory=list)
     overall_reasoning: str = ""
 

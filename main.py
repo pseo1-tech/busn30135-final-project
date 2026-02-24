@@ -54,16 +54,21 @@ def display_results(state: SentimentState, label: str = ""):
         agg_table.add_column("Articles", justify="right", style="yellow", width=9)
         agg_table.add_column("Avg Sentiment", justify="right", style="green", width=14)
         agg_table.add_column("Avg Direction", justify="right", style="blue", width=14)
+        agg_table.add_column("Avg FinBERT", justify="right", style="magenta", width=13)
 
         for agg in state.ticker_aggregates:
             sent_color = "green" if agg.avg_sentiment > 0 else ("red" if agg.avg_sentiment < 0 else "white")
             dir_color = "green" if agg.avg_price_direction > 5 else ("red" if agg.avg_price_direction < 5 else "white")
+            fb = agg.avg_finbert_sentiment
+            fb_color = "green" if fb is not None and fb > 0 else ("red" if fb is not None and fb < 0 else "white")
+            fb_str = f"[{fb_color}]{fb:+.3f}[/{fb_color}]" if fb is not None else "[dim]N/A[/dim]"
 
             agg_table.add_row(
                 agg.ticker,
                 str(agg.num_articles),
                 f"[{sent_color}]{agg.avg_sentiment:+.3f}[/{sent_color}]",
                 f"[{dir_color}]{agg.avg_price_direction:.1f}/10[/{dir_color}]",
+                fb_str,
             )
 
         console.print(agg_table)
@@ -147,32 +152,22 @@ def display_combined_summary(all_day_results: list):
 def build_scores_dataframe(all_day_results: list) -> pd.DataFrame:
     """
     Build a flat DataFrame from pipeline results with one row per (date, ticker) pair.
+    Pulls from ticker_aggregates (already computed by aggregator_node) to avoid
+    re-aggregating and to include avg_finbert_sentiment.
 
-    Columns: date, ticker, num_articles, avg_sentiment, avg_direction
+    Columns: date, ticker, num_articles, avg_sentiment, avg_direction, avg_finbert_sentiment
     """
     rows = []
     for day in all_day_results:
         date_str = day["date"]
-        # Group article scores by ticker for this date
-        ticker_map: dict[str, list] = {}
-        for score in day["article_scores"]:
-            tickers = score.get("tickers", [])
-            if not tickers:
-                ticker_map.setdefault("GENERAL", []).append(score)
-            else:
-                for t in tickers:
-                    ticker_map.setdefault(t, []).append(score)
-
-        for ticker, scores in sorted(ticker_map.items()):
-            n = len(scores)
-            avg_s = sum(s["sentiment_score"] for s in scores) / n
-            avg_d = sum(s["price_direction_score"] for s in scores) / n
+        for agg in day.get("ticker_aggregates", []):
             rows.append({
                 "date": date_str,
-                "ticker": ticker,
-                "num_articles": n,
-                "avg_sentiment": round(avg_s, 4),
-                "avg_direction": round(avg_d, 2),
+                "ticker": agg["ticker"],
+                "num_articles": agg["num_articles"],
+                "avg_sentiment": agg["avg_sentiment"],
+                "avg_direction": agg["avg_price_direction"],
+                "avg_finbert_sentiment": agg.get("avg_finbert_sentiment"),
             })
 
     df = pd.DataFrame(rows)
@@ -268,32 +263,314 @@ def display_backtest_results(summary: dict, results_df: pd.DataFrame):
         console.print("[yellow]No backtest results to display.[/yellow]")
         return
 
-    table = Table(title="\n[bold cyan]Backtest Results[/bold cyan]", show_header=True, header_style="bold magenta")
-    table.add_column("Metric", style="cyan", width=20)
-    table.add_column("Sentiment Strategy", justify="right", style="green", width=20)
-    table.add_column("Equal Weight", justify="right", style="blue", width=20)
-
     strat = summary["strategy"]
+    strat_net = summary.get("strategy_net")
     ew = summary["equal_weight"]
 
-    metrics = [
-        ("Total Return", f"{strat['total_return']:+.2f}%", f"{ew['total_return']:+.2f}%"),
-        ("Annualized Return", f"{strat['annualized_return']:+.2f}%", f"{ew['annualized_return']:+.2f}%"),
-        ("Annualized Vol", f"{strat['annualized_vol']:.2f}%", f"{ew['annualized_vol']:.2f}%"),
-        ("Sharpe Ratio", f"{strat['sharpe_ratio']:.3f}", f"{ew['sharpe_ratio']:.3f}"),
-        ("Max Drawdown", f"{strat['max_drawdown']:.2f}%", f"{ew['max_drawdown']:.2f}%"),
-        ("Periods", str(strat["n_periods"]), str(ew["n_periods"])),
+    table = Table(title="\n[bold cyan]Backtest Results[/bold cyan]", show_header=True, header_style="bold magenta")
+    table.add_column("Metric", style="cyan", width=20)
+    table.add_column("Strategy (Gross)", justify="right", style="green", width=18)
+    if strat_net:
+        table.add_column("Strategy (Net)", justify="right", style="yellow", width=16)
+    table.add_column("Equal Weight", justify="right", style="blue", width=14)
+
+    metric_keys = [
+        ("Total Return",      "total_return",      "{:+.2f}%"),
+        ("Annualized Return", "annualized_return",  "{:+.2f}%"),
+        ("Annualized Vol",    "annualized_vol",     "{:.2f}%"),
+        ("Sharpe Ratio",      "sharpe_ratio",       "{:.3f}"),
+        ("Max Drawdown",      "max_drawdown",       "{:.2f}%"),
+        ("Periods",           "n_periods",          "{}"),
     ]
 
-    for label, s_val, e_val in metrics:
-        table.add_row(label, s_val, e_val)
+    for label, key, fmt in metric_keys:
+        s_val = fmt.format(strat[key])
+        e_val = fmt.format(ew[key])
+        if strat_net:
+            n_val = fmt.format(strat_net[key])
+            table.add_row(label, s_val, n_val, e_val)
+        else:
+            table.add_row(label, s_val, e_val)
 
     console.print(table)
 
-    # Show excess return
-    excess = strat["total_return"] - ew["total_return"]
-    color = "green" if excess > 0 else "red"
-    console.print(f"\n  [{color}]Strategy excess return: {excess:+.2f}%[/{color}]")
+    # Turnover / tcost footnote
+    if strat_net and "avg_turnover" in summary:
+        console.print(
+            f"  [dim]Avg one-way turnover: {summary['avg_turnover']:.1f}%  |  "
+            f"Avg tcost drag: {summary['avg_tcost_bps']:.2f} bps/period[/dim]"
+        )
+
+    # Excess return lines
+    gross_excess = strat["total_return"] - ew["total_return"]
+    color = "green" if gross_excess > 0 else "red"
+    console.print(f"\n  [{color}]Strategy excess return (gross): {gross_excess:+.2f}%[/{color}]")
+    if strat_net:
+        net_excess = strat_net["total_return"] - ew["total_return"]
+        color_net = "green" if net_excess > 0 else "red"
+        console.print(f"  [{color_net}]Strategy excess return (net):   {net_excess:+.2f}%[/{color_net}]")
+
+
+_BACKTEST_SIGNALS = [
+    ("avg_direction",         "Direction"),
+    ("avg_sentiment",         "Sentiment"),
+    ("avg_finbert_sentiment",  "FinBERT"),
+]
+
+
+def display_multi_backtest_results(all_summaries: dict):
+    """Display a scoreboard table comparing all signal strategies side by side."""
+    if not all_summaries:
+        console.print("[yellow]No backtest results to display.[/yellow]")
+        return
+
+    table = Table(
+        title="\n[bold cyan]Backtest Comparison — All Signals[/bold cyan]",
+        show_header=True, header_style="bold magenta"
+    )
+    table.add_column("Strategy", style="cyan", width=22)
+    table.add_column("Total Return", justify="right", width=13)
+    table.add_column("Ann. Return",  justify="right", width=12)
+    table.add_column("Ann. Vol",     justify="right", width=10)
+    table.add_column("Sharpe",       justify="right", width=8)
+    table.add_column("Max DD",       justify="right", width=10)
+
+    def color_val(v, fmt, higher_is_better=True):
+        is_good = v > 0 if higher_is_better else v < 0
+        color = "green" if is_good else ("red" if (v < 0 if higher_is_better else v > 0) else "white")
+        return f"[{color}]{fmt.format(v)}[/{color}]"
+
+    ew = None
+    for i, (label, summary) in enumerate(all_summaries.items()):
+        if ew is None:
+            ew = summary["equal_weight"]
+
+        for key, row_label, style in [
+            ("strategy",     f"{label} (Gross)", "green"),
+            ("strategy_net", f"{label} (Net)",   "yellow"),
+        ]:
+            s = summary.get(key)
+            if s is None:
+                continue
+            table.add_row(
+                f"[{style}]{row_label}[/{style}]",
+                color_val(s["total_return"],      "{:+.2f}%"),
+                color_val(s["annualized_return"],  "{:+.2f}%"),
+                f"{s['annualized_vol']:.2f}%",
+                color_val(s["sharpe_ratio"],       "{:.3f}"),
+                color_val(s["max_drawdown"],       "{:.2f}%", higher_is_better=False),
+            )
+
+        # Turnover footnote per signal
+        if "avg_turnover" in summary:
+            console.print(
+                f"  [dim]{label}: avg one-way turnover {summary['avg_turnover']:.1f}%  "
+                f"→  avg tcost drag {summary['avg_tcost_bps']:.2f} bps/period[/dim]"
+            ) if i == 0 else None  # printed after table below
+
+        if i < len(all_summaries) - 1:
+            table.add_section()
+
+    # Equal weight benchmark row
+    if ew:
+        table.add_section()
+        table.add_row(
+            "[blue]Equal Weight[/blue]",
+            color_val(ew["total_return"],      "{:+.2f}%"),
+            color_val(ew["annualized_return"],  "{:+.2f}%"),
+            f"{ew['annualized_vol']:.2f}%",
+            color_val(ew["sharpe_ratio"],       "{:.3f}"),
+            color_val(ew["max_drawdown"],       "{:.2f}%", higher_is_better=False),
+        )
+
+    console.print(table)
+
+    # Turnover footnotes for all signals
+    for label, summary in all_summaries.items():
+        if "avg_turnover" in summary:
+            console.print(
+                f"  [dim]{label}: avg one-way turnover {summary['avg_turnover']:.1f}%  "
+                f"→  avg tcost drag {summary['avg_tcost_bps']:.2f} bps/period[/dim]"
+            )
+
+    # Excess return vs equal weight
+    console.print()
+    for label, summary in all_summaries.items():
+        ew_ret = summary["equal_weight"]["total_return"]
+        for key, variant in [("strategy", "gross"), ("strategy_net", "net")]:
+            s = summary.get(key)
+            if s is None:
+                continue
+            excess = s["total_return"] - ew_ret
+            color = "green" if excess > 0 else "red"
+            console.print(f"  [{color}]{label} ({variant}) excess return: {excess:+.2f}%[/{color}]")
+
+
+def run_all_backtests(
+    sector_signals: pd.DataFrame,
+    etf_data,
+    signal_dates: list,
+    b_param: float,
+    tcost_bps: float,
+) -> tuple[dict, dict]:
+    """
+    Run backtest for every available signal column.
+    Returns (summaries, results_dfs) where both are {label: ...} dicts.
+    """
+    from backtest import run_backtest, backtest_summary as bt_summary
+
+    summaries = {}
+    results_dfs = {}
+    for col, label in _BACKTEST_SIGNALS:
+        if col not in sector_signals.columns or sector_signals[col].isna().all():
+            continue
+        df = run_backtest(
+            sector_signals=sector_signals,
+            etf_data=etf_data,
+            signal_dates=signal_dates,
+            signal_col=col,
+            b_param=b_param,
+            tcost_bps=tcost_bps,
+        )
+        if not df.empty:
+            summaries[label] = bt_summary(df)
+            results_dfs[label] = df
+
+    return summaries, results_dfs
+
+
+def display_regression_results(reg_df: pd.DataFrame):
+    """Display OLS regression results as a Rich table."""
+    if reg_df.empty:
+        return
+
+    table = Table(
+        title="\n[bold cyan]Regression vs. Equal-Weight Benchmark[/bold cyan]  "
+              "[dim](r_strategy = α + β·r_ew + ε)[/dim]",
+        show_header=True, header_style="bold magenta"
+    )
+    table.add_column("Strategy",          style="cyan",  width=22)
+    table.add_column("Alpha (ann.)",      justify="right", width=13)
+    table.add_column("Beta",              justify="right", width=7)
+    table.add_column("R²",               justify="right", width=7)
+    table.add_column("t(α)",             justify="right", width=8)
+    table.add_column("Track. Err.",       justify="right", width=12)
+    table.add_column("Info Ratio",        justify="right", width=11)
+
+    for _, row in reg_df.iterrows():
+        alpha = row["alpha_ann_pct"]
+        t = row["t_stat_alpha"]
+        ir = row["info_ratio"]
+        alpha_color = "green" if alpha > 0 else "red"
+        t_color     = "green" if t > 2 else ("yellow" if t > 1 else "red")
+        ir_color    = "green" if ir > 0 else "red"
+
+        table.add_row(
+            row["strategy"],
+            f"[{alpha_color}]{alpha:+.3f}%[/{alpha_color}]",
+            f"{row['beta']:.3f}",
+            f"{row['r_squared']:.3f}",
+            f"[{t_color}]{t:.3f}[/{t_color}]",
+            f"{row['tracking_error_ann_pct']:.2f}%",
+            f"[{ir_color}]{ir:.3f}[/{ir_color}]",
+        )
+
+    console.print(table)
+    console.print(
+        "  [dim]α: annualized intercept (outperformance unexplained by benchmark exposure)  "
+        "|  t(α) > 2 ≈ significant at 95%  |  IR = α / tracking error[/dim]"
+    )
+
+
+def display_cross_regression_results(cross_df: pd.DataFrame):
+    """Display cross-strategy OLS regression results as a Rich table."""
+    if cross_df.empty:
+        return
+
+    table = Table(
+        title="\n[bold cyan]Cross-Strategy Regression[/bold cyan]  "
+              "[dim](r_A = α + β·r_B + ε)[/dim]",
+        show_header=True, header_style="bold magenta"
+    )
+    table.add_column("Dependent (A)",   style="cyan",  width=18)
+    table.add_column("Independent (B)", style="yellow", width=18)
+    table.add_column("Alpha (ann.)",    justify="right", width=13)
+    table.add_column("Beta",            justify="right", width=7)
+    table.add_column("R²",             justify="right", width=7)
+    table.add_column("t(α)",           justify="right", width=8)
+
+    for _, row in cross_df.iterrows():
+        alpha = row["alpha_ann_pct"]
+        t = row["t_stat_alpha"]
+        alpha_color = "green" if alpha > 0 else "red"
+        t_color = "green" if t > 2 else ("yellow" if t > 1 else "red")
+
+        table.add_row(
+            row["dependent"],
+            row["independent"],
+            f"[{alpha_color}]{alpha:+.3f}%[/{alpha_color}]",
+            f"{row['beta']:.3f}",
+            f"{row['r_squared']:.3f}",
+            f"[{t_color}]{t:.3f}[/{t_color}]",
+        )
+
+    console.print(table)
+    console.print(
+        "  [dim]α: incremental return of A not explained by B's return stream  "
+        "|  t(α) > 2 ≈ significant at 95%[/dim]"
+    )
+
+
+def display_factor_regression_results(factor_df: pd.DataFrame):
+    """Display Fama-French 6-factor regression results as a Rich table."""
+    if factor_df.empty:
+        return
+
+    # Determine which beta columns are present
+    beta_cols = [c for c in factor_df.columns if c.startswith("beta_")]
+    factor_labels = {
+        "beta_Mkt_RF": "Mkt-RF",
+        "beta_SMB":    "SMB",
+        "beta_HML":    "HML",
+        "beta_RMW":    "RMW",
+        "beta_CMA":    "CMA",
+        "beta_MOM":    "MOM",
+    }
+
+    table = Table(
+        title="\n[bold cyan]Fama-French 6-Factor Regression[/bold cyan]  "
+              "[dim](r_strategy − RF = α + Σ βᵢ·Fᵢ + ε)[/dim]",
+        show_header=True, header_style="bold magenta"
+    )
+    table.add_column("Strategy",    style="cyan", width=18)
+    table.add_column("Alpha (ann.)", justify="right", width=13)
+    table.add_column("t(α)",        justify="right", width=8)
+    table.add_column("R²",         justify="right", width=7)
+    for bc in beta_cols:
+        table.add_column(factor_labels.get(bc, bc.replace("beta_", "")), justify="right", width=8)
+
+    for _, row in factor_df.iterrows():
+        alpha = row["alpha_ann_pct"]
+        t = row["t_stat_alpha"]
+        alpha_color = "green" if alpha > 0 else "red"
+        t_color = "green" if t > 2 else ("yellow" if t > 1 else "red")
+
+        cells = [
+            row["strategy"],
+            f"[{alpha_color}]{alpha:+.3f}%[/{alpha_color}]",
+            f"[{t_color}]{t:.3f}[/{t_color}]",
+            f"{row['r_squared']:.3f}",
+        ]
+        for bc in beta_cols:
+            cells.append(f"{row[bc]:.3f}")
+
+        table.add_row(*cells)
+
+    console.print(table)
+    console.print(
+        "  [dim]α: annualized return not explained by the 6 Fama-French factors  "
+        "|  t(α) > 2 ≈ significant at 95%[/dim]"
+    )
 
 
 def generate_date_range(start_date: str, end_date: str) -> list:
@@ -342,8 +619,8 @@ async def run_date_range(
     base_logs_dir: str = None,
     concurrency: int = 5,
     run_backtest_flag: bool = False,
-    signal_col: str = "avg_direction",
     b_param: float = 5.0,
+    tcost_bps: float = 10.0,
     etf_data_path: str = None,
 ):
     """Run the pipeline over a range of dates in parallel, reusing the optimized prompt across all days."""
@@ -392,11 +669,7 @@ async def run_date_range(
     # Run backtest if requested
     if run_backtest_flag and not scores_df.empty:
         console.print("\n[bold cyan]Running sector rotation backtest...[/bold cyan]")
-        from backtest import (
-            backtest_summary,
-            load_etf_data,
-            run_backtest,
-        )
+        from backtest import load_etf_data
         from sector_mapping import aggregate_sector_signals, map_scores_to_sectors
 
         # Map ticker scores to sectors
@@ -417,23 +690,45 @@ async def run_date_range(
             # Load ETF return data
             etf_data = load_etf_data(etf_data_path) if etf_data_path else load_etf_data()
 
-            # Run backtest
-            results_df = run_backtest(
+            # Run backtest for all available signals
+            all_summaries, results_dfs = run_all_backtests(
                 sector_signals=sector_signals,
                 etf_data=etf_data,
                 signal_dates=dates,
-                signal_col=signal_col,
                 b_param=b_param,
+                tcost_bps=tcost_bps,
             )
 
-            if not results_df.empty:
-                summary = backtest_summary(results_df)
-                display_backtest_results(summary, results_df)
+            if all_summaries:
+                display_multi_backtest_results(all_summaries)
+
+                from backtest import (
+                    regression_analysis, cross_strategy_regression,
+                    factor_regression, load_ff_factors,
+                )
+                reg_df = regression_analysis(results_dfs)
+                display_regression_results(reg_df)
+
+                cross_df = cross_strategy_regression(results_dfs)
+                display_cross_regression_results(cross_df)
+
+                ff_factors = load_ff_factors()
+                factor_df = factor_regression(results_dfs, ff_factors, signal_dates=dates)
+                display_factor_regression_results(factor_df)
 
                 if base_logs_dir:
-                    bt_path = f"{base_logs_dir}/backtest_results.csv"
-                    results_df.to_csv(bt_path, index=False)
-                    console.print(f"[green]Saved backtest results to: {bt_path}[/green]")
+                    reg_path = f"{base_logs_dir}/regression_results.csv"
+                    reg_df.to_csv(reg_path, index=False)
+                    console.print(f"[green]Saved regression results to: {reg_path}[/green]")
+
+                    cross_path = f"{base_logs_dir}/cross_strategy_regression.csv"
+                    cross_df.to_csv(cross_path, index=False)
+                    console.print(f"[green]Saved cross-strategy regression to: {cross_path}[/green]")
+
+                    if not factor_df.empty:
+                        factor_path = f"{base_logs_dir}/factor_regression.csv"
+                        factor_df.to_csv(factor_path, index=False)
+                        console.print(f"[green]Saved FF6 factor regression to: {factor_path}[/green]")
             else:
                 console.print("[yellow]Backtest produced no results (need at least 2 signal dates).[/yellow]")
 
@@ -461,12 +756,75 @@ if __name__ == "__main__":
     parser.add_argument("--api-key", default=None, help="Massive API key (or set MASSIVE_API_KEY env var)")
     parser.add_argument("--concurrency", type=int, default=5, help="Max parallel dates in range mode (default: 5)")
     parser.add_argument("--backtest", action="store_true", help="Run sector rotation backtest after scoring")
-    parser.add_argument("--signal", default="avg_direction", choices=["avg_direction", "avg_sentiment"],
+    parser.add_argument("--from-signals", default=None, metavar="CSV",
+                        help="Skip pipeline entirely and run backtest directly from a saved sector_signals.csv")
+    parser.add_argument("--signal", default="avg_direction", choices=["avg_direction", "avg_sentiment", "avg_finbert_sentiment"],
                         help="Signal column for backtest (default: avg_direction)")
     parser.add_argument("--b-param", type=float, default=5.0, help="Softmax aggressiveness parameter (default: 5.0)")
+    parser.add_argument("--tcost", type=float, default=10.0, help="Round-trip transaction cost in bps (default: 10 bps)")
     parser.add_argument("--etf-data", default=None, help="Path to ETFData.parquet (auto-detected if not set)")
 
     args = parser.parse_args()
+
+    # --- Standalone backtest mode: load cached sector_signals.csv, skip pipeline ---
+    if args.from_signals:
+        import sys
+        from backtest import load_etf_data
+
+        console.print(f"[bold cyan]Standalone backtest mode — loading signals from:[/bold cyan] {args.from_signals}")
+        sector_signals = pd.read_csv(args.from_signals, parse_dates=["date"])
+        if sector_signals.empty:
+            console.print("[bold red]Error:[/bold red] sector_signals.csv is empty.")
+            sys.exit(1)
+
+        signal_dates = sorted(sector_signals["date"].dt.strftime("%Y-%m-%d").unique().tolist())
+        console.print(f"  {len(signal_dates)} signal dates: {signal_dates[0]} to {signal_dates[-1]}")
+
+        etf_data = load_etf_data(args.etf_data) if args.etf_data else load_etf_data()
+        all_summaries, results_dfs = run_all_backtests(
+            sector_signals=sector_signals,
+            etf_data=etf_data,
+            signal_dates=signal_dates,
+            b_param=args.b_param,
+            tcost_bps=args.tcost,
+        )
+
+        if not all_summaries:
+            console.print("[yellow]Backtest produced no results (need at least 2 signal dates).[/yellow]")
+            sys.exit(0)
+
+        display_multi_backtest_results(all_summaries)
+
+        from backtest import (
+            regression_analysis, cross_strategy_regression,
+            factor_regression, load_ff_factors,
+        )
+        reg_df = regression_analysis(results_dfs)
+        display_regression_results(reg_df)
+
+        cross_df = cross_strategy_regression(results_dfs)
+        display_cross_regression_results(cross_df)
+
+        ff_factors = load_ff_factors()
+        factor_df = factor_regression(results_dfs, ff_factors, signal_dates=signal_dates)
+        display_factor_regression_results(factor_df)
+
+        # Save results alongside the signals file
+        signals_dir = os.path.dirname(args.from_signals)
+        reg_path = os.path.join(signals_dir, "regression_results.csv")
+        reg_df.to_csv(reg_path, index=False)
+        console.print(f"[green]Saved regression results to: {reg_path}[/green]")
+
+        cross_path = os.path.join(signals_dir, "cross_strategy_regression.csv")
+        cross_df.to_csv(cross_path, index=False)
+        console.print(f"[green]Saved cross-strategy regression to: {cross_path}[/green]")
+
+        if not factor_df.empty:
+            factor_path = os.path.join(signals_dir, "factor_regression.csv")
+            factor_df.to_csv(factor_path, index=False)
+            console.print(f"[green]Saved FF6 factor regression to: {factor_path}[/green]")
+
+        sys.exit(0)
 
     # Validate date arguments
     if args.date and (args.start_date or args.end_date):
@@ -546,7 +904,7 @@ if __name__ == "__main__":
             base_logs_dir=logs_dir,
             concurrency=args.concurrency,
             run_backtest_flag=args.backtest,
-            signal_col=args.signal,
             b_param=args.b_param,
+            tcost_bps=args.tcost,
             etf_data_path=args.etf_data,
         ))

@@ -4,3 +4,5 @@ logs/
 .env
 secrets.txt
 .DS_Store
+F-F_*.csv
+F-F_*.zip
