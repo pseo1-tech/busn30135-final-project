@@ -584,7 +584,9 @@ def plot_sector_weights(results_dfs: dict, save_dir: str = None):
     One subplot per strategy, x-axis = signal date, y-axis = portfolio weight (0–1).
     Saves to save_dir/sector_weights.png if provided; otherwise shows inline.
     """
-    from sector_mapping import SECTOR_ETFS
+    from sector_mapping import SECTOR_ETFS, SECTOR_TO_ETF
+
+    ETF_TO_SECTOR = {v: k for k, v in SECTOR_TO_ETF.items()}
 
     if not results_dfs:
         return
@@ -600,7 +602,7 @@ def plot_sector_weights(results_dfs: dict, save_dir: str = None):
         ax = axes[row_idx, 0]
 
         weight_cols = [f"w_{etf}" for etf in SECTOR_ETFS if f"w_{etf}" in df.columns]
-        sector_names = [c.replace("w_", "") for c in weight_cols]
+        sector_names = [ETF_TO_SECTOR.get(c.replace("w_", ""), c.replace("w_", "")) for c in weight_cols]
         dates = df["signal_date"].values
         weights = df[weight_cols].values.T  # shape (n_sectors, n_periods)
 
