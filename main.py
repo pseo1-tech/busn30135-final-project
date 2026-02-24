@@ -6,6 +6,10 @@ import json
 import os
 from datetime import datetime, timedelta
 
+import matplotlib
+matplotlib.use("Agg")  # non-interactive backend — no window popup
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import numpy as np
 import pandas as pd
 
@@ -573,6 +577,61 @@ def display_factor_regression_results(factor_df: pd.DataFrame):
     )
 
 
+def plot_sector_weights(results_dfs: dict, save_dir: str = None):
+    """
+    Plot sector ETF weights over time for each strategy as stacked area charts.
+
+    One subplot per strategy, x-axis = signal date, y-axis = portfolio weight (0–1).
+    Saves to save_dir/sector_weights.png if provided; otherwise shows inline.
+    """
+    from sector_mapping import SECTOR_ETFS
+
+    if not results_dfs:
+        return
+
+    n = len(results_dfs)
+    # Distinct color per sector (tab20 has 20 colors)
+    colors = plt.cm.tab20.colors[:len(SECTOR_ETFS)]
+
+    fig, axes = plt.subplots(n, 1, figsize=(14, 4 * n), squeeze=False)
+    fig.suptitle("Sector ETF Weights Over Time", fontsize=14, fontweight="bold", y=1.01)
+
+    for row_idx, (label, df) in enumerate(results_dfs.items()):
+        ax = axes[row_idx, 0]
+
+        weight_cols = [f"w_{etf}" for etf in SECTOR_ETFS if f"w_{etf}" in df.columns]
+        sector_names = [c.replace("w_", "") for c in weight_cols]
+        dates = df["signal_date"].values
+        weights = df[weight_cols].values.T  # shape (n_sectors, n_periods)
+
+        ax.stackplot(dates, weights, labels=sector_names, colors=colors, alpha=0.85)
+
+        # Equal-weight reference line at each sector boundary (just show 1/11 guide)
+        eq = 1.0 / len(SECTOR_ETFS)
+        ax.axhline(eq, color="black", linestyle="--", linewidth=0.8, alpha=0.4,
+                   label=f"Equal weight ({eq:.2f})")
+
+        ax.set_title(f"{label} Strategy", fontsize=11, fontweight="bold")
+        ax.set_ylabel("Portfolio Weight")
+        ax.set_ylim(0, 1)
+        ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0))
+        ax.tick_params(axis="x", rotation=30)
+
+        # Legend outside the plot to the right
+        ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0),
+                  fontsize=8, framealpha=0.8, ncol=1)
+
+    plt.tight_layout()
+
+    if save_dir:
+        path = os.path.join(save_dir, "sector_weights.png")
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        console.print(f"[green]Saved sector weights plot to: {path}[/green]")
+    else:
+        plt.show()
+
+
 def generate_date_range(start_date: str, end_date: str) -> list:
     """Generate a list of date strings from start_date to end_date (inclusive)."""
     start = datetime.strptime(start_date, "%Y-%m-%d")
@@ -729,6 +788,8 @@ async def run_date_range(
                         factor_path = f"{base_logs_dir}/factor_regression.csv"
                         factor_df.to_csv(factor_path, index=False)
                         console.print(f"[green]Saved FF6 factor regression to: {factor_path}[/green]")
+
+                plot_sector_weights(results_dfs, save_dir=base_logs_dir)
             else:
                 console.print("[yellow]Backtest produced no results (need at least 2 signal dates).[/yellow]")
 
@@ -824,6 +885,7 @@ if __name__ == "__main__":
             factor_df.to_csv(factor_path, index=False)
             console.print(f"[green]Saved FF6 factor regression to: {factor_path}[/green]")
 
+        plot_sector_weights(results_dfs, save_dir=signals_dir)
         sys.exit(0)
 
     # Validate date arguments
