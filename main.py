@@ -656,6 +656,17 @@ async def run_single_date(date_str: str, ticker: str, base_logs_dir: str, cached
         if day_logs:
             os.makedirs(day_logs, exist_ok=True)
 
+        # Resume: if this date already completed successfully, load and return cached result
+        cached_result_path = f"{day_logs}/results.json" if day_logs else None
+        if cached_result_path and os.path.exists(cached_result_path):
+            try:
+                with open(cached_result_path) as f:
+                    cached = json.load(f)
+                console.print(f"  [dim]⏭  {date_str}: skipping (cached)[/dim]")
+                return cached
+            except (json.JSONDecodeError, KeyError):
+                pass  # corrupt cache — fall through and re-run
+
         state = await run_pipeline(date_str, ticker=ticker, logs_dir=day_logs, cached_prompt=cached_prompt)
 
         day_result = {
@@ -819,6 +830,8 @@ if __name__ == "__main__":
     parser.add_argument("--api-key", default=None, help="Massive API key (or set MASSIVE_API_KEY env var)")
     parser.add_argument("--concurrency", type=int, default=5, help="Max parallel dates in range mode (default: 5)")
     parser.add_argument("--backtest", action="store_true", help="Run sector rotation backtest after scoring")
+    parser.add_argument("--resume", default=None, metavar="LOGS_DIR",
+                        help="Resume an interrupted range run by reusing an existing logs directory (skips already-completed dates)")
     parser.add_argument("--from-signals", default=None, metavar="CSV",
                         help="Skip pipeline entirely and run backtest directly from a saved sector_signals.csv")
     parser.add_argument("--signal", default="avg_direction", choices=["avg_direction", "avg_sentiment", "avg_finbert_sentiment"],
@@ -957,9 +970,13 @@ if __name__ == "__main__":
             console.print("[bold red]Error:[/bold red] No trading dates found in the given range.")
             import sys; sys.exit(1)
 
-        slug = f"{args.start_date}_to_{args.end_date}_{args.freq}_{args.ticker or 'all'}"
-        logs_dir = f"logs/{timestamp}_{slug}"
-        os.makedirs(logs_dir, exist_ok=True)
+        if args.resume:
+            logs_dir = args.resume.rstrip("/")
+            console.print(f"[bold cyan]Resuming run from:[/bold cyan] {logs_dir}")
+        else:
+            slug = f"{args.start_date}_to_{args.end_date}_{args.freq}_{args.ticker or 'all'}"
+            logs_dir = f"logs/{timestamp}_{slug}"
+            os.makedirs(logs_dir, exist_ok=True)
 
         console.print(f"[bold]Running pipeline for {len(dates)} {args.freq} signal dates: {dates[0]} to {dates[-1]} (concurrency={args.concurrency})[/bold]")
         asyncio.run(run_date_range(
