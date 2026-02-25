@@ -1,17 +1,13 @@
 """
-Ticker-to-sector mapping with static CSV seed + yfinance fallback.
+Ticker-to-sector mapping using a static CSV seed.
 
 Maps individual stock tickers (e.g. AAPL) to GICS sectors (e.g. Information Technology)
-and then to sector ETFs (e.g. XLK).
+and then to sector ETFs (e.g. XLK). Unknown tickers are silently dropped — no network
+calls are made at runtime.
 """
 
-import logging
 import os
 import pandas as pd
-
-# Suppress noisy HTTP warnings from yfinance/urllib3 (e.g. 404s for unknown tickers)
-logging.getLogger("urllib3").setLevel(logging.CRITICAL)
-logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 # GICS sector name -> sector ETF ticker
 SECTOR_TO_ETF = {
@@ -50,66 +46,20 @@ def _load_cache():
     _cache_loaded = True
 
 
-def _yfinance_lookup(ticker: str, timeout: float = 5.0) -> str | None:
-    """Look up a ticker's sector via yfinance. Returns None on failure or timeout."""
-    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-
-    def _fetch() -> str | None:
-        import yfinance as yf
-        info = yf.Ticker(ticker).info
-        sector = info.get("sector")
-        if sector and sector in SECTOR_TO_ETF:
-            return sector
-        for key in SECTOR_TO_ETF:
-            if sector and key.lower() in sector.lower():
-                return key
-        return None
-
-    executor = ThreadPoolExecutor(max_workers=1)
-    try:
-        return executor.submit(_fetch).result(timeout=timeout)
-    except (FuturesTimeoutError, Exception):
-        return None
-    finally:
-        executor.shutdown(wait=False)  # don't block on the hung thread
-
-
-def _append_to_csv(ticker: str, sector: str):
-    """Append a newly discovered mapping to the seed CSV for future use."""
-    try:
-        with open(_SEED_CSV, "a") as f:
-            f.write(f"{ticker},{sector}\n")
-    except Exception:
-        pass
-
-
 def get_sector(ticker: str) -> str | None:
     """
-    Get the GICS sector for a ticker. Uses cache first, then yfinance fallback.
-    Returns None if the ticker can't be classified.
+    Get the GICS sector for a ticker from the seed CSV.
+    Returns None if the ticker is not in the seed.
     """
     _load_cache()
-    ticker = ticker.upper()
-
-    # Check cache
-    if ticker in _cache:
-        return _cache[ticker]
-
-    # yfinance fallback
-    sector = _yfinance_lookup(ticker)
-    if sector:
-        _cache[ticker] = sector
-        _append_to_csv(ticker, sector)
-        return sector
-
-    return None
+    return _cache.get(ticker.upper())
 
 
 def get_sector_etf(ticker: str) -> str | None:
     """
     Get the sector ETF for a stock ticker.
     e.g. AAPL -> XLK, JPM -> XLF
-    Returns None if the ticker can't be classified.
+    Returns None if the ticker is not in the seed CSV.
     """
     sector = get_sector(ticker)
     if sector:
@@ -124,31 +74,7 @@ def map_scores_to_sectors(scores_df: pd.DataFrame) -> pd.DataFrame:
 
     Returns DataFrame with columns: date, ticker, sector_etf, avg_sentiment, avg_direction
     """
-    from concurrent.futures import ThreadPoolExecutor
-
     _load_cache()
-
-    # Look up each unique ticker once (in parallel for yfinance misses), then broadcast
-    unique_tickers = scores_df["ticker"].unique().tolist()
-    unknown = [t for t in unique_tickers if t.upper() not in _cache]
-
-    if unknown:
-        from concurrent.futures import as_completed
-        from rich.progress import Progress, SpinnerColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
-        print(f"  Resolving {len(unknown)} unknown tickers via yfinance (20 parallel)...")
-        with Progress(
-            SpinnerColumn(),
-            "[progress.description]{task.description}",
-            BarColumn(),
-            TaskProgressColumn(),
-            TimeElapsedColumn(),
-            transient=True,
-        ) as progress:
-            task = progress.add_task("yfinance lookup", total=len(unknown))
-            with ThreadPoolExecutor(max_workers=20) as pool:
-                futures = [pool.submit(get_sector, t) for t in unknown]
-                for _ in as_completed(futures):
-                    progress.advance(task)
 
     sector_etfs = [get_sector_etf(t) for t in scores_df["ticker"]]
 
