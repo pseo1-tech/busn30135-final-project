@@ -577,6 +577,73 @@ def display_factor_regression_results(factor_df: pd.DataFrame):
     )
 
 
+def display_b_param_results(tune_results: dict):
+    """Display b_param sweep (in-sample) and out-of-sample performance."""
+    if not tune_results:
+        return
+
+    signal_col = tune_results["signal_col"]
+    best_b     = tune_results["best_b"]
+    is_start, is_end   = tune_results["is_dates"]
+    oos_start, oos_end = tune_results["oos_dates"]
+    sweep      = tune_results["sweep"]
+    oos        = tune_results["oos_summary"]
+
+    # --- In-sample sweep table ---
+    sweep_table = Table(
+        title=f"\n[bold cyan]b_param Sweep — {signal_col} (In-Sample: {is_start} to {is_end})[/bold cyan]",
+        show_header=True, header_style="bold magenta",
+    )
+    sweep_table.add_column("b_param",      justify="right", width=9)
+    sweep_table.add_column("IS Sharpe",    justify="right", width=11)
+    sweep_table.add_column("IS Ann Ret",   justify="right", width=11)
+    sweep_table.add_column("IS Total Ret", justify="right", width=12)
+    sweep_table.add_column("IS Max DD",    justify="right", width=10)
+
+    for _, row in sweep.iterrows():
+        is_best = row["b_param"] == best_b
+        style   = "bold green" if is_best else ""
+        marker  = " ◀ best" if is_best else ""
+        sweep_table.add_row(
+            f"[{style}]{row['b_param']}{marker}[/{style}]" if style else f"{row['b_param']}{marker}",
+            f"[{style}]{row['is_sharpe']:+.3f}[/{style}]" if style else f"{row['is_sharpe']:+.3f}",
+            f"[{style}]{row['is_ann_ret_pct']:+.2f}%[/{style}]" if style else f"{row['is_ann_ret_pct']:+.2f}%",
+            f"[{style}]{row['is_total_ret_pct']:+.2f}%[/{style}]" if style else f"{row['is_total_ret_pct']:+.2f}%",
+            f"[{style}]{row['is_max_dd_pct']:+.2f}%[/{style}]" if style else f"{row['is_max_dd_pct']:+.2f}%",
+        )
+    console.print(sweep_table)
+
+    # --- Out-of-sample results ---
+    if not oos:
+        return
+
+    oos_table = Table(
+        title=f"[bold cyan]Out-of-Sample Performance — b={best_b} (OOS: {oos_start} to {oos_end})[/bold cyan]",
+        show_header=True, header_style="bold magenta",
+    )
+    oos_table.add_column("Strategy",    style="cyan",    width=22)
+    oos_table.add_column("Ann Ret",     justify="right", width=10)
+    oos_table.add_column("Sharpe",      justify="right", width=8)
+    oos_table.add_column("Max DD",      justify="right", width=10)
+    oos_table.add_column("Total Ret",   justify="right", width=11)
+
+    def _row(label, s, style=""):
+        c = lambda v, good: f"[green]{v}[/green]" if good else f"[red]{v}[/red]"
+        oos_table.add_row(
+            f"[{style}]{label}[/{style}]" if style else label,
+            c(f"{s['annualized_return']:+.2f}%", s["annualized_return"] > 0),
+            c(f"{s['sharpe_ratio']:+.3f}",       s["sharpe_ratio"] > 0),
+            c(f"{s['max_drawdown']:+.2f}%",      s["max_drawdown"] > -10),
+            c(f"{s['total_return']:+.2f}%",      s["total_return"] > 0),
+        )
+
+    _row(f"Strategy Gross (b={best_b})", oos["strategy"],     "green")
+    if "strategy_net" in oos:
+        _row(f"Strategy Net   (b={best_b})", oos["strategy_net"], "yellow")
+    _row("Equal Weight",                  oos["equal_weight"])
+    console.print(oos_table)
+
+
 def plot_sector_weights(results_dfs: dict, save_dir: str = None):
     """
     Plot sector ETF weights over time for each strategy as stacked area charts.
@@ -776,7 +843,7 @@ async def run_date_range(
 
                 from backtest import (
                     regression_analysis, cross_strategy_regression,
-                    factor_regression, load_ff_factors,
+                    factor_regression, load_ff_factors, tune_b_param,
                 )
                 reg_df = regression_analysis(results_dfs)
                 display_regression_results(reg_df)
@@ -787,6 +854,14 @@ async def run_date_range(
                 ff_factors = load_ff_factors()
                 factor_df = factor_regression(results_dfs, ff_factors, signal_dates=dates)
                 display_factor_regression_results(factor_df)
+
+                # b_param tuning: in-sample / out-of-sample split
+                for signal_col, _ in _BACKTEST_SIGNALS:
+                    tune_res = tune_b_param(
+                        sector_signals, etf_data, dates,
+                        signal_col=signal_col, tcost_bps=tcost_bps,
+                    )
+                    display_b_param_results(tune_res)
 
                 if base_logs_dir:
                     reg_path = f"{base_logs_dir}/regression_results.csv"
@@ -873,7 +948,7 @@ if __name__ == "__main__":
 
         from backtest import (
             regression_analysis, cross_strategy_regression,
-            factor_regression, load_ff_factors,
+            factor_regression, load_ff_factors, tune_b_param,
         )
         reg_df = regression_analysis(results_dfs)
         display_regression_results(reg_df)
@@ -884,6 +959,13 @@ if __name__ == "__main__":
         ff_factors = load_ff_factors()
         factor_df = factor_regression(results_dfs, ff_factors, signal_dates=signal_dates)
         display_factor_regression_results(factor_df)
+
+        for signal_col, _ in _BACKTEST_SIGNALS:
+            tune_res = tune_b_param(
+                sector_signals, etf_data, signal_dates,
+                signal_col=signal_col, tcost_bps=args.tcost,
+            )
+            display_b_param_results(tune_res)
 
         # Save results alongside the signals file
         signals_dir = os.path.dirname(args.from_signals)

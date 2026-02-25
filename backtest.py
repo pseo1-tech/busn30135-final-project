@@ -393,6 +393,68 @@ def backtest_summary(results_df: pd.DataFrame) -> dict:
     return summary
 
 
+def tune_b_param(
+    sector_signals: pd.DataFrame,
+    etf_data: pd.DataFrame,
+    signal_dates: list,
+    signal_col: str = "avg_direction",
+    b_values: list = None,
+    tcost_bps: float = 10.0,
+) -> dict:
+    """
+    Split signal_dates 50/50, sweep b_param on the first half (in-sample),
+    pick the value with the best net Sharpe ratio, then evaluate on the
+    second half (out-of-sample).
+
+    Returns a dict with keys:
+        is_dates, oos_dates, best_b, sweep (DataFrame), oos_results (DataFrame),
+        oos_summary (dict)
+    """
+    if b_values is None:
+        b_values = [0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0]
+
+    dates = sorted([str(d) for d in signal_dates])
+    mid = len(dates) // 2
+    is_dates  = dates[:mid + 1]   # first half + 1 so last period has a forward return
+    oos_dates = dates[mid:]       # second half
+
+    sweep_rows = []
+    for b in b_values:
+        df = run_backtest(sector_signals, etf_data, is_dates, signal_col, b, tcost_bps)
+        if df.empty:
+            continue
+        s = backtest_summary(df)
+        net = s.get("strategy_net", s["strategy"])
+        ew  = s["equal_weight"]
+        sweep_rows.append({
+            "b_param":         b,
+            "is_sharpe":       net["sharpe_ratio"],
+            "is_ann_ret_pct":  net["annualized_return"],
+            "is_total_ret_pct":net["total_return"],
+            "is_max_dd_pct":   net["max_drawdown"],
+            "ew_sharpe":       ew["sharpe_ratio"],
+        })
+
+    if not sweep_rows:
+        return {}
+
+    sweep_df = pd.DataFrame(sweep_rows)
+    best_b   = float(sweep_df.loc[sweep_df["is_sharpe"].idxmax(), "b_param"])
+
+    oos_df      = run_backtest(sector_signals, etf_data, oos_dates, signal_col, best_b, tcost_bps)
+    oos_summary = backtest_summary(oos_df) if not oos_df.empty else {}
+
+    return {
+        "signal_col": signal_col,
+        "is_dates":   (is_dates[0],  is_dates[-1]),
+        "oos_dates":  (oos_dates[0], oos_dates[-1]),
+        "best_b":     best_b,
+        "sweep":      sweep_df,
+        "oos_results":  oos_df,
+        "oos_summary":  oos_summary,
+    }
+
+
 def _read_ff_csv(path: str) -> pd.DataFrame:
     """
     Parse a Ken French CSV file, skipping the text preamble and Copyright footer.
