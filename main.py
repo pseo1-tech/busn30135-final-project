@@ -714,6 +714,89 @@ def plot_sector_weights(results_dfs: dict, save_dir: str = None, split_dates: di
         plt.show()
 
 
+def plot_cumulative_returns(tune_results: dict, save_dir: str = None):
+    """
+    Plot cumulative returns for each strategy in two panels side-by-side:
+      Left : Total-space  — gross, net, and equal-weight cumulative return
+      Right: Active-space — gross and net cumulative active return vs equal weight
+
+    One row per signal type. IS/OOS boundary marked with a vertical dotted line.
+    """
+    if not tune_results:
+        return
+
+    labels = [label for label, tr in tune_results.items() if tr and
+              not tr.get("is_results", pd.DataFrame()).empty]
+    if not labels:
+        return
+
+    n = len(labels)
+    fig, axes = plt.subplots(n, 2, figsize=(16, 4 * n), squeeze=False)
+    fig.suptitle("Cumulative Returns — Total & Active Space",
+                 fontsize=14, fontweight="bold", y=1.01)
+
+    for row_idx, label in enumerate(labels):
+        tr      = tune_results[label]
+        best_b  = tr["best_b"]
+        df      = pd.concat([tr["is_results"], tr["oos_results"]], ignore_index=True)
+        split_dt = pd.Timestamp(tr["oos_dates_list"][0])
+
+        dates   = pd.to_datetime(df["signal_date"])
+        gross   = (1 + df["strategy_return"]).cumprod() - 1
+        net     = (1 + df["strategy_return_net"]).cumprod() - 1
+        ew      = (1 + df["equal_weight_return"]).cumprod() - 1
+        act_gross = (1 + df["strategy_return"]     - df["equal_weight_return"]).cumprod() - 1
+        act_net   = (1 + df["strategy_return_net"] - df["equal_weight_return"]).cumprod() - 1
+
+        def _add_split(ax):
+            ax.axvline(split_dt, color="black", linestyle=":", linewidth=1.5, alpha=0.6)
+            ymin, ymax = ax.get_ylim()
+            mid_is  = dates.iloc[0]  + (split_dt - dates.iloc[0])  / 2
+            mid_oos = split_dt       + (dates.iloc[-1] - split_dt) / 2
+            ax.text(mid_is,  ymax, "In-Sample",     ha="center", va="top",
+                    fontsize=7, color="dimgray", style="italic")
+            ax.text(mid_oos, ymax, "Out-of-Sample", ha="center", va="top",
+                    fontsize=7, color="dimgray", style="italic")
+
+        # --- Total space ---
+        ax_total = axes[row_idx, 0]
+        ax_total.plot(dates, gross * 100, label="Gross",        color="steelblue",  linewidth=1.8)
+        ax_total.plot(dates, net   * 100, label="Net",          color="darkorange", linewidth=1.8)
+        ax_total.plot(dates, ew    * 100, label="Equal Weight", color="gray",
+                      linewidth=1.2, linestyle="--")
+        ax_total.axhline(0, color="black", linewidth=0.6, alpha=0.4)
+        ax_total.yaxis.set_major_formatter(mticker.PercentFormatter())
+        ax_total.set_title(f"{label} (b={best_b}) — Total", fontsize=10, fontweight="bold")
+        ax_total.set_ylabel("Cumulative Return")
+        ax_total.tick_params(axis="x", rotation=30)
+        ax_total.legend(fontsize=8)
+        _add_split(ax_total)
+
+        # --- Active space ---
+        ax_active = axes[row_idx, 1]
+        ax_active.plot(dates, act_gross * 100, label="Gross Active", color="steelblue",  linewidth=1.8)
+        ax_active.plot(dates, act_net   * 100, label="Net Active",   color="darkorange", linewidth=1.8)
+        ax_active.axhline(0, color="black", linewidth=0.8, linestyle="--", alpha=0.5,
+                          label="Equal Weight (0%)")
+        ax_active.yaxis.set_major_formatter(mticker.PercentFormatter())
+        ax_active.set_title(f"{label} (b={best_b}) — Active vs Equal Weight",
+                            fontsize=10, fontweight="bold")
+        ax_active.set_ylabel("Cumulative Active Return")
+        ax_active.tick_params(axis="x", rotation=30)
+        ax_active.legend(fontsize=8)
+        _add_split(ax_active)
+
+    plt.tight_layout()
+
+    if save_dir:
+        path = os.path.join(save_dir, "cumulative_returns.png")
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        console.print(f"[green]Saved cumulative returns plot to: {path}[/green]")
+    else:
+        plt.show()
+
+
 def generate_date_range(start_date: str, end_date: str) -> list:
     """Generate a list of date strings from start_date to end_date (inclusive)."""
     start = datetime.strptime(start_date, "%Y-%m-%d")
@@ -906,6 +989,7 @@ async def run_date_range(
                         split_dates[label]  = tr["oos_dates_list"][0]
                 plot_sector_weights(combined_dfs or results_dfs, save_dir=base_logs_dir,
                                     split_dates=split_dates or None)
+                plot_cumulative_returns(tune_results, save_dir=base_logs_dir)
             else:
                 console.print("[yellow]Backtest produced no results (need at least 2 signal dates).[/yellow]")
 
@@ -1026,6 +1110,7 @@ if __name__ == "__main__":
                 split_dates[label]  = tr["oos_dates_list"][0]
         plot_sector_weights(combined_dfs or results_dfs, save_dir=signals_dir,
                             split_dates=split_dates or None)
+        plot_cumulative_returns(tune_results, save_dir=signals_dir)
         sys.exit(0)
 
     # Validate date arguments
