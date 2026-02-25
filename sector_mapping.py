@@ -122,12 +122,19 @@ def map_scores_to_sectors(scores_df: pd.DataFrame) -> pd.DataFrame:
 
     Returns DataFrame with columns: date, ticker, sector_etf, avg_sentiment, avg_direction
     """
+    from concurrent.futures import ThreadPoolExecutor
+
     _load_cache()
 
-    sector_etfs = []
-    for ticker in scores_df["ticker"]:
-        etf = get_sector_etf(ticker)
-        sector_etfs.append(etf)
+    # Look up each unique ticker once (in parallel for yfinance misses), then broadcast
+    unique_tickers = scores_df["ticker"].unique().tolist()
+    unknown = [t for t in unique_tickers if t.upper() not in _cache]
+
+    if unknown:
+        with ThreadPoolExecutor(max_workers=20) as pool:
+            list(pool.map(get_sector, unknown))  # populates _cache and sector_map.csv
+
+    sector_etfs = [get_sector_etf(t) for t in scores_df["ticker"]]
 
     scores_df = scores_df.copy()
     scores_df["sector_etf"] = sector_etfs
