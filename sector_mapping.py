@@ -50,21 +50,26 @@ def _load_cache():
     _cache_loaded = True
 
 
-def _yfinance_lookup(ticker: str) -> str | None:
-    """Look up a ticker's sector via yfinance. Returns None on failure."""
-    try:
+def _yfinance_lookup(ticker: str, timeout: float = 5.0) -> str | None:
+    """Look up a ticker's sector via yfinance. Returns None on failure or timeout."""
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
+    def _fetch() -> str | None:
         import yfinance as yf
         info = yf.Ticker(ticker).info
         sector = info.get("sector")
         if sector and sector in SECTOR_TO_ETF:
             return sector
-        # yfinance sometimes returns slightly different names
         for key in SECTOR_TO_ETF:
             if sector and key.lower() in sector.lower():
                 return key
-    except Exception:
-        pass
-    return None
+        return None
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(_fetch).result(timeout=timeout)
+    except (FuturesTimeoutError, Exception):
+        return None
 
 
 def _append_to_csv(ticker: str, sector: str):
