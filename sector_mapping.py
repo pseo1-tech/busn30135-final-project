@@ -133,8 +133,22 @@ def map_scores_to_sectors(scores_df: pd.DataFrame) -> pd.DataFrame:
     unknown = [t for t in unique_tickers if t.upper() not in _cache]
 
     if unknown:
-        with ThreadPoolExecutor(max_workers=20) as pool:
-            list(pool.map(get_sector, unknown))  # populates _cache and sector_map.csv
+        from concurrent.futures import as_completed
+        from rich.progress import Progress, SpinnerColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
+        print(f"  Resolving {len(unknown)} unknown tickers via yfinance (20 parallel)...")
+        with Progress(
+            SpinnerColumn(),
+            "[progress.description]{task.description}",
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeElapsedColumn(),
+            transient=True,
+        ) as progress:
+            task = progress.add_task("yfinance lookup", total=len(unknown))
+            with ThreadPoolExecutor(max_workers=20) as pool:
+                futures = [pool.submit(get_sector, t) for t in unknown]
+                for _ in as_completed(futures):
+                    progress.advance(task)
 
     sector_etfs = [get_sector_etf(t) for t in scores_df["ticker"]]
 
