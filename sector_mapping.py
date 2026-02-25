@@ -65,11 +65,13 @@ def _yfinance_lookup(ticker: str, timeout: float = 5.0) -> str | None:
                 return key
         return None
 
+    executor = ThreadPoolExecutor(max_workers=1)
     try:
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            return executor.submit(_fetch).result(timeout=timeout)
+        return executor.submit(_fetch).result(timeout=timeout)
     except (FuturesTimeoutError, Exception):
         return None
+    finally:
+        executor.shutdown(wait=False)  # don't block on the hung thread
 
 
 def _append_to_csv(ticker: str, sector: str):
