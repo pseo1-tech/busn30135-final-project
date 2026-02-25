@@ -441,17 +441,21 @@ def tune_b_param(
     sweep_df = pd.DataFrame(sweep_rows)
     best_b   = float(sweep_df.loc[sweep_df["is_sharpe"].idxmax(), "b_param"])
 
+    is_df       = run_backtest(sector_signals, etf_data, is_dates,  signal_col, best_b, tcost_bps)
     oos_df      = run_backtest(sector_signals, etf_data, oos_dates, signal_col, best_b, tcost_bps)
     oos_summary = backtest_summary(oos_df) if not oos_df.empty else {}
 
     return {
-        "signal_col": signal_col,
-        "is_dates":   (is_dates[0],  is_dates[-1]),
-        "oos_dates":  (oos_dates[0], oos_dates[-1]),
-        "best_b":     best_b,
-        "sweep":      sweep_df,
-        "oos_results":  oos_df,
-        "oos_summary":  oos_summary,
+        "signal_col":     signal_col,
+        "is_dates":       (is_dates[0],  is_dates[-1]),
+        "oos_dates":      (oos_dates[0], oos_dates[-1]),
+        "is_dates_list":  is_dates,
+        "oos_dates_list": oos_dates,
+        "best_b":         best_b,
+        "sweep":          sweep_df,
+        "is_results":     is_df,
+        "oos_results":    oos_df,
+        "oos_summary":    oos_summary,
     }
 
 

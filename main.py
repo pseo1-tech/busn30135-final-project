@@ -644,12 +644,14 @@ def display_b_param_results(tune_results: dict):
     console.print(oos_table)
 
 
-def plot_sector_weights(results_dfs: dict, save_dir: str = None):
+def plot_sector_weights(results_dfs: dict, save_dir: str = None, split_dates: dict = None):
     """
     Plot sector ETF weights over time for each strategy as stacked area charts.
 
     One subplot per strategy, x-axis = signal date, y-axis = portfolio weight (0–1).
-    Saves to save_dir/sector_weights.png if provided; otherwise shows inline.
+    If split_dates = {label: date_str} is provided, draws a vertical dashed line
+    and shades/labels the In-Sample and Out-of-Sample regions.
+    Saves to save_dir/sector_weights.png if provided.
     """
     from sector_mapping import SECTOR_ETFS, SECTOR_TO_ETF
 
@@ -659,7 +661,6 @@ def plot_sector_weights(results_dfs: dict, save_dir: str = None):
         return
 
     n = len(results_dfs)
-    # Distinct color per sector (tab20 has 20 colors)
     colors = plt.cm.tab20.colors[:len(SECTOR_ETFS)]
 
     fig, axes = plt.subplots(n, 1, figsize=(14, 4 * n), squeeze=False)
@@ -671,22 +672,34 @@ def plot_sector_weights(results_dfs: dict, save_dir: str = None):
         weight_cols = [f"w_{etf}" for etf in SECTOR_ETFS if f"w_{etf}" in df.columns]
         sector_names = [ETF_TO_SECTOR.get(c.replace("w_", ""), c.replace("w_", "")) for c in weight_cols]
         dates = df["signal_date"].values
-        weights = df[weight_cols].values.T  # shape (n_sectors, n_periods)
+        weights = df[weight_cols].values.T
 
         ax.stackplot(dates, weights, labels=sector_names, colors=colors, alpha=0.85)
 
-        # Equal-weight reference line at each sector boundary (just show 1/11 guide)
         eq = 1.0 / len(SECTOR_ETFS)
         ax.axhline(eq, color="black", linestyle="--", linewidth=0.8, alpha=0.4,
                    label=f"Equal weight ({eq:.2f})")
+
+        # IS/OOS split line and region labels
+        if split_dates and label in split_dates:
+            split_dt = pd.Timestamp(split_dates[label])
+            ax.axvline(split_dt, color="black", linestyle=":", linewidth=1.5, alpha=0.7)
+            ax.text(split_dt, 1.02, "▼ OOS", transform=ax.get_xaxis_transform(),
+                    ha="center", va="bottom", fontsize=8, color="black")
+            x_min = pd.Timestamp(dates[0])
+            x_max = pd.Timestamp(dates[-1])
+            mid_is  = x_min + (split_dt - x_min) / 2
+            mid_oos = split_dt + (x_max - split_dt) / 2
+            ax.text(mid_is,  0.97, "In-Sample",     transform=ax.get_xaxis_transform(),
+                    ha="center", va="top", fontsize=8, color="dimgray", style="italic")
+            ax.text(mid_oos, 0.97, "Out-of-Sample", transform=ax.get_xaxis_transform(),
+                    ha="center", va="top", fontsize=8, color="dimgray", style="italic")
 
         ax.set_title(f"{label} Strategy", fontsize=11, fontweight="bold")
         ax.set_ylabel("Portfolio Weight")
         ax.set_ylim(0, 1)
         ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0))
         ax.tick_params(axis="x", rotation=30)
-
-        # Legend outside the plot to the right
         ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0),
                   fontsize=8, framealpha=0.8, ncol=1)
 
@@ -845,39 +858,54 @@ async def run_date_range(
                     regression_analysis, cross_strategy_regression,
                     factor_regression, load_ff_factors, tune_b_param,
                 )
-                reg_df = regression_analysis(results_dfs)
-                display_regression_results(reg_df)
 
-                cross_df = cross_strategy_regression(results_dfs)
-                display_cross_regression_results(cross_df)
-
-                ff_factors = load_ff_factors()
-                factor_df = factor_regression(results_dfs, ff_factors, signal_dates=dates)
-                display_factor_regression_results(factor_df)
-
-                # b_param tuning: in-sample / out-of-sample split
-                for signal_col, _ in _BACKTEST_SIGNALS:
+                # Step 1: b_param sweep — IS tuning + OOS evaluation
+                tune_results = {}
+                for signal_col, label in _BACKTEST_SIGNALS:
                     tune_res = tune_b_param(
                         sector_signals, etf_data, dates,
                         signal_col=signal_col, tcost_bps=tcost_bps,
                     )
+                    tune_results[label] = tune_res
                     display_b_param_results(tune_res)
 
-                if base_logs_dir:
-                    reg_path = f"{base_logs_dir}/regression_results.csv"
-                    reg_df.to_csv(reg_path, index=False)
-                    console.print(f"[green]Saved regression results to: {reg_path}[/green]")
+                # Step 2: Regressions on OOS results
+                oos_results_dfs = {
+                    label: tr["oos_results"]
+                    for label, tr in tune_results.items()
+                    if tr and not tr.get("oos_results", pd.DataFrame()).empty
+                }
+                oos_signal_dates = next(
+                    (tr["oos_dates_list"] for tr in tune_results.values() if tr and "oos_dates_list" in tr),
+                    dates,
+                )
+                if oos_results_dfs:
+                    ff_factors = load_ff_factors()
+                    reg_df   = regression_analysis(oos_results_dfs)
+                    cross_df = cross_strategy_regression(oos_results_dfs)
+                    factor_df = factor_regression(oos_results_dfs, ff_factors, signal_dates=oos_signal_dates)
+                    display_regression_results(reg_df)
+                    display_cross_regression_results(cross_df)
+                    display_factor_regression_results(factor_df)
 
-                    cross_path = f"{base_logs_dir}/cross_strategy_regression.csv"
-                    cross_df.to_csv(cross_path, index=False)
-                    console.print(f"[green]Saved cross-strategy regression to: {cross_path}[/green]")
+                    if base_logs_dir:
+                        reg_df.to_csv(f"{base_logs_dir}/regression_results.csv", index=False)
+                        console.print(f"[green]Saved regression results to: {base_logs_dir}/regression_results.csv[/green]")
+                        cross_df.to_csv(f"{base_logs_dir}/cross_strategy_regression.csv", index=False)
+                        console.print(f"[green]Saved cross-strategy regression to: {base_logs_dir}/cross_strategy_regression.csv[/green]")
+                        if not factor_df.empty:
+                            factor_df.to_csv(f"{base_logs_dir}/factor_regression.csv", index=False)
+                            console.print(f"[green]Saved FF6 factor regression to: {base_logs_dir}/factor_regression.csv[/green]")
 
-                    if not factor_df.empty:
-                        factor_path = f"{base_logs_dir}/factor_regression.csv"
-                        factor_df.to_csv(factor_path, index=False)
-                        console.print(f"[green]Saved FF6 factor regression to: {factor_path}[/green]")
-
-                plot_sector_weights(results_dfs, save_dir=base_logs_dir)
+                # Step 3: Sector weights plot — IS+OOS concatenated with split line
+                combined_dfs = {}
+                split_dates  = {}
+                for label, tr in tune_results.items():
+                    if tr and not tr.get("is_results", pd.DataFrame()).empty and not tr.get("oos_results", pd.DataFrame()).empty:
+                        combined_dfs[label] = pd.concat([tr["is_results"], tr["oos_results"]], ignore_index=True)
+                        split_dates[label]  = tr["oos_dates_list"][0]
+                plot_sector_weights(combined_dfs or results_dfs, save_dir=base_logs_dir,
+                                    split_dates=split_dates or None)
             else:
                 console.print("[yellow]Backtest produced no results (need at least 2 signal dates).[/yellow]")
 
@@ -950,39 +978,54 @@ if __name__ == "__main__":
             regression_analysis, cross_strategy_regression,
             factor_regression, load_ff_factors, tune_b_param,
         )
-        reg_df = regression_analysis(results_dfs)
-        display_regression_results(reg_df)
 
-        cross_df = cross_strategy_regression(results_dfs)
-        display_cross_regression_results(cross_df)
-
-        ff_factors = load_ff_factors()
-        factor_df = factor_regression(results_dfs, ff_factors, signal_dates=signal_dates)
-        display_factor_regression_results(factor_df)
-
-        for signal_col, _ in _BACKTEST_SIGNALS:
+        # Step 1: b_param sweep — IS tuning + OOS evaluation
+        tune_results = {}
+        for signal_col, label in _BACKTEST_SIGNALS:
             tune_res = tune_b_param(
                 sector_signals, etf_data, signal_dates,
                 signal_col=signal_col, tcost_bps=args.tcost,
             )
+            tune_results[label] = tune_res
             display_b_param_results(tune_res)
 
-        # Save results alongside the signals file
+        # Step 2: Regressions on OOS results
         signals_dir = os.path.dirname(args.from_signals)
-        reg_path = os.path.join(signals_dir, "regression_results.csv")
-        reg_df.to_csv(reg_path, index=False)
-        console.print(f"[green]Saved regression results to: {reg_path}[/green]")
+        oos_results_dfs = {
+            label: tr["oos_results"]
+            for label, tr in tune_results.items()
+            if tr and not tr.get("oos_results", pd.DataFrame()).empty
+        }
+        oos_signal_dates = next(
+            (tr["oos_dates_list"] for tr in tune_results.values() if tr and "oos_dates_list" in tr),
+            signal_dates,
+        )
+        if oos_results_dfs:
+            ff_factors = load_ff_factors()
+            reg_df    = regression_analysis(oos_results_dfs)
+            cross_df  = cross_strategy_regression(oos_results_dfs)
+            factor_df = factor_regression(oos_results_dfs, ff_factors, signal_dates=oos_signal_dates)
+            display_regression_results(reg_df)
+            display_cross_regression_results(cross_df)
+            display_factor_regression_results(factor_df)
 
-        cross_path = os.path.join(signals_dir, "cross_strategy_regression.csv")
-        cross_df.to_csv(cross_path, index=False)
-        console.print(f"[green]Saved cross-strategy regression to: {cross_path}[/green]")
+            reg_df.to_csv(os.path.join(signals_dir, "regression_results.csv"), index=False)
+            console.print(f"[green]Saved regression results to: {signals_dir}/regression_results.csv[/green]")
+            cross_df.to_csv(os.path.join(signals_dir, "cross_strategy_regression.csv"), index=False)
+            console.print(f"[green]Saved cross-strategy regression to: {signals_dir}/cross_strategy_regression.csv[/green]")
+            if not factor_df.empty:
+                factor_df.to_csv(os.path.join(signals_dir, "factor_regression.csv"), index=False)
+                console.print(f"[green]Saved FF6 factor regression to: {signals_dir}/factor_regression.csv[/green]")
 
-        if not factor_df.empty:
-            factor_path = os.path.join(signals_dir, "factor_regression.csv")
-            factor_df.to_csv(factor_path, index=False)
-            console.print(f"[green]Saved FF6 factor regression to: {factor_path}[/green]")
-
-        plot_sector_weights(results_dfs, save_dir=signals_dir)
+        # Step 3: Sector weights plot — IS+OOS concatenated with split line
+        combined_dfs = {}
+        split_dates  = {}
+        for label, tr in tune_results.items():
+            if tr and not tr.get("is_results", pd.DataFrame()).empty and not tr.get("oos_results", pd.DataFrame()).empty:
+                combined_dfs[label] = pd.concat([tr["is_results"], tr["oos_results"]], ignore_index=True)
+                split_dates[label]  = tr["oos_dates_list"][0]
+        plot_sector_weights(combined_dfs or results_dfs, save_dir=signals_dir,
+                            split_dates=split_dates or None)
         sys.exit(0)
 
     # Validate date arguments
